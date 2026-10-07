@@ -7,6 +7,7 @@ from coldstore.quota import validate_amount
 from coldstore.temp import validate_temp
 
 from .http import Request, Response, json_response
+from .quota_control import apply_enforcement
 from .runtime import Runtime
 
 
@@ -44,8 +45,9 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
         elif room_id:
             rt.defrost.finish(room_id)
 
-    quota_value = rt.accumulator.add(amount)
+    period = rt.settlement.post_usage(amount)
     rt.auditor.record("cycle", f"{temp:.4f}")
+    enforcement = apply_enforcement(rt)
 
     return json_response(
         {
@@ -57,7 +59,10 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
             "stage": rt.compressors.stage(comp_id)[0] if comp_id else 0,
             "supply_open": rt.supply.is_open(comp_id) if comp_id else False,
             "defrosting": rt.defrost.defrosting(),
-            "quota": quota_value,
+            "quota": period.used,
+            "quota_seq": period.seq,
+            "quota_balance": period.balance,
+            "enforcement": enforcement.as_dict(),
             "cooling_load": rt.load.load_for(temp),
             "audit_count": rt.auditor.count(),
         }

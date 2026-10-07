@@ -10,8 +10,14 @@ from coldstore.evap import validate_baseline
 from coldstore.fan import PRIMARY, STANDBY
 from coldstore.load import validate_baseline as validate_load_baseline
 from coldstore.ns import Stage, control_line
-from coldstore.quota import Quota, check_quota, validate_amount
-from coldstore.reporting import audit_export, telemetry_export, to_csv
+from coldstore.quota import (
+    DEFAULT_PERIOD_LIMIT,
+    Quota,
+    SettlementError,
+    check_quota,
+    validate_amount,
+)
+from coldstore.reporting import audit_export, quota_export_rows, telemetry_export, to_csv
 from coldstore.room import validate_zone
 from coldstore.scheduler import validate_threshold as validate_schedule_threshold
 from coldstore.store import export_state
@@ -20,6 +26,7 @@ from coldstore.valve import OPEN, validate_valve
 
 from . import checks, history, ops
 from . import describe as describe_module
+from . import quota_control
 from . import simulate as simulate_module
 from . import snapshot as snapshot_module
 from . import telemetry as telemetry_module
@@ -600,11 +607,30 @@ def load_estimate(server: "Server", request: Request) -> Response:
 def quota_add(server: "Server", request: Request) -> Response:
     amount = request.float_field("amount")
     validate_amount(amount)
-    return json_response({"value": server.runtime.accumulator.add(amount)})
+    period = server.runtime.settlement.post_usage(amount)
+    server.runtime.auditor.record("quota-post", f"seq={period.seq} amount={amount:.4f}")
+    enforcement = quota_control.apply_enforcement(server.runtime)
+    return json_response(
+        {
+            "value": period.used,
+            "seq": period.seq,
+            "balance": period.balance,
+            "ratio": period.ratio,
+            "enforcement": enforcement.as_dict(),
+        }
+    )
 
 
 def quota_get(server: "Server", request: Request) -> Response:
-    return json_response({"value": server.runtime.accumulator.value()})
+    settlement = server.runtime.settlement
+    open_period = settlement.open()
+    return json_response(
+        {
+            "value": open_period.used if open_period else 0.0,
+            "open": open_period.as_dict() if open_period else None,
+            "enforcement": server.runtime.enforcement.state(settlement),
+        }
+    )
 
 
 def quota_remaining(server: "Server", request: Request) -> Response:
@@ -620,6 +646,101 @@ def quota_check(server: "Server", request: Request) -> Response:
 def quota_reset(server: "Server", request: Request) -> Response:
     server.runtime.accumulator.reset()
     return json_response({"value": server.runtime.accumulator.value()})
+
+
+def quota_period_open(server: "Server", request: Request) -> Response:
+    label = request.str_field("label")
+    limit = request.float_field("limit", DEFAULT_PERIOD_LIMIT)
+    settlement = server.runtime.settlement
+    period = settlement.open_period(label=label, limit=limit)
+    server.runtime.auditor.record("quota-open", f"seq={period.seq} label={period.label} limit={limit:.4f}")
+    return json_response({"period": period.as_dict()})
+
+
+def quota_period_settle(server: "Server", request: Request) -> Response:
+    settlement = server.runtime.settlement
+    period = settlement.settle(note=request.str_field("note", "manual settle"))
+    server.runtime.auditor.record(
+        "quota-settle",
+        f"seq={period.seq} used={period.used:.4f} closing={period.balance:.4f}",
+    )
+    return json_response({"period": period.as_dict()})
+
+
+def quota_period_close(server: "Server", request: Request) -> Response:
+    settlement = server.runtime.settlement
+    new_period, settled = settlement.close_shift(
+        label=request.str_field("label"),
+        limit=request.float_field("limit", DEFAULT_PERIOD_LIMIT),
+    )
+    server.runtime.auditor.record(
+        "quota-settle",
+        f"seq={settled.seq} used={settled.used:.4f} closing={settled.balance:.4f}",
+    )
+    server.runtime.auditor.record(
+        "quota-open", f"seq={new_period.seq} label={new_period.label} limit={new_period.limit:.4f}"
+    )
+    return json_response({"settled": settled.as_dict(), "open": new_period.as_dict()})
+
+
+def quota_period_rollback(server: "Server", request: Request) -> Response:
+    seq = request.int_field("seq")
+    reason = request.str_field("reason", "operator rollback")
+    rollback = server.runtime.settlement.rollback(seq, reason)
+    server.runtime.auditor.record(
+        "quota-rollback",
+        f"seq={seq} settlement={rollback.settlement_id} "
+        f"was={rollback.superseded_balance:.4f} now={rollback.reverted_balance:.4f} reason={reason}",
+    )
+    return json_response({"rollback": rollback.as_dict(), "period": server.runtime.settlement.period(seq).as_dict()})
+
+
+def quota_period_adjust(server: "Server", request: Request) -> Response:
+    seq = request.int_field("seq")
+    amount = request.float_field("amount")
+    note = request.str_field("note", "correction")
+    period = server.runtime.settlement.adjust(seq, amount, note)
+    server.runtime.auditor.record(
+        "quota-adjust", f"seq={seq} amount={amount:.4f} balance={period.balance:.4f} note={note}"
+    )
+    return json_response({"period": period.as_dict()})
+
+
+def quota_balance(server: "Server", request: Request) -> Response:
+    """Operator lookup: balance for one shift period."""
+
+    seq = request.int_field("seq", 0)
+    settlement = server.runtime.settlement
+    period = settlement.period(seq) if seq else settlement.open()
+    if period is None:
+        raise SettlementError("no shift period exists yet")
+    return json_response({"period": period.as_dict()})
+
+
+def quota_ledger(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.settlement.view().as_dict())
+
+
+def quota_rollbacks(server: "Server", request: Request) -> Response:
+    rollbacks = server.runtime.settlement.rollbacks()
+    return json_response({"rollbacks": [row.as_dict() for row in rollbacks], "count": len(rollbacks)})
+
+
+def quota_enforcement_state(server: "Server", request: Request) -> Response:
+    settlement = server.runtime.settlement
+    return json_response(server.runtime.enforcement.state(settlement))
+
+
+def quota_enforcement_reset(server: "Server", request: Request) -> Response:
+    reason = request.str_field("reason", "operator reset")
+    event = quota_control.reset_enforcement(server.runtime, reason)
+    return json_response({"event": event.as_dict()})
+
+
+def quota_export(server: "Server", request: Request) -> Response:
+    columns, rows = quota_export_rows(server.runtime.settlement)
+    return csv_response(to_csv(columns, rows))
+
 
 
 def audit_list(server: "Server", request: Request) -> Response:

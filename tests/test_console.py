@@ -65,6 +65,8 @@ class ConsoleCase(unittest.TestCase):
                 "defrost",
                 "load",
                 "quota",
+                "quota_ledger",
+                "quota_enforcement",
                 "audit",
                 "schedule",
             },

@@ -10,7 +10,7 @@ from coldstore.evap import Condenser
 from coldstore.fan import FanSet
 from coldstore.interlock import Interlock
 from coldstore.load import LoadCalculator
-from coldstore.quota import Accumulator
+from coldstore.quota import Accumulator, Enforcement, Settlement
 from coldstore.room import RoomRegistry
 from coldstore.scheduler import Scheduler
 from coldstore.store import Store
@@ -38,5 +38,7 @@ class Runtime:
         self.defrost = Controller(cold_fans, rooms, store)
         self.load = LoadCalculator(store)
         self.accumulator = Accumulator(store)
+        self.settlement = self.accumulator.settlement
+        self.enforcement = Enforcement(store)
         self.auditor = Auditor(store)
         self.scheduler = Scheduler(store)

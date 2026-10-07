@@ -25,6 +25,21 @@ def collect(rt: Runtime) -> dict[str, str]:
         "defrost": rt.defrost.describe(),
         "load": rt.load.describe(rt.rooms),
         "quota": rt.accumulator.describe(),
+        "quota_settlement": _describe_settlement(rt),
+        "quota_enforcement": (
+            f"quota enforcement level={rt.enforcement.state(rt.settlement)['level']}"
+        ),
         "audit": rt.auditor.describe(),
         "schedule": rt.scheduler.describe(rt.rooms),
     }
+
+
+def _describe_settlement(rt: Runtime) -> str:
+    view = rt.settlement.view()
+    open_period = next((period for period in view.periods if period.seq == view.open_seq), None)
+    if open_period is None:
+        return f"quota settlement periods={len(view.periods)} open=none"
+    return (
+        f"quota settlement seq={open_period.seq} used={open_period.used:.4f} "
+        f"balance={open_period.balance:.4f}"
+    )

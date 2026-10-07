@@ -54,6 +54,16 @@ class Store:
             self._data[key] = value
             self._save_locked()
 
+    def put_many(self, updates: dict[str, str], deletes: list[str] | None = None) -> None:
+        """Apply several key changes atomically, persisting them once."""
+
+        with self._lock:
+            for key, value in updates.items():
+                self._data[key] = value
+            for key in deletes or []:
+                self._data.pop(key, None)
+            self._save_locked()
+
     def delete(self, key: str) -> None:
         with self._lock:
             if key not in self._data:

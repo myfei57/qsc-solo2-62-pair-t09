@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover - imported only for type checkers
     from coldstore.audit import Auditor
     from coldstore.console.telemetry import Telemetry
+    from coldstore.quota import Settlement
 
 QUOTE_TRIGGERS = (",", '"', "\n")
 
@@ -40,3 +41,24 @@ def telemetry_export(telemetry: Telemetry) -> tuple[list[str], list[list[object]
     """Columns and rows for the telemetry counters."""
 
     return ["metric", "value"], [[key, value] for key, value in telemetry.as_dict().items()]
+
+
+def quota_export_rows(settlement: Settlement) -> tuple[list[str], list[list[object]]]:
+    """Columns and rows for the per-shift balance ledger."""
+
+    columns = ["seq", "label", "state", "limit", "carryover", "used", "balance", "average", "ratio"]
+    rows = [
+        [
+            period.seq,
+            period.label,
+            period.state,
+            period.limit,
+            period.carryover,
+            period.used,
+            period.balance,
+            period.average,
+            period.ratio,
+        ]
+        for period in settlement.view().periods
+    ]
+    return columns, rows
