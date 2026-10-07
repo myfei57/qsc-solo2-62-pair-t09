@@ -56,4 +56,14 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
     else:
         checks.append({"name": "rooms", "status": "ok", "detail": "every room assigned"})
 
+    chain = rt.settlement.verify_chain()
+    if not chain["consistent"]:
+        checks.append({"name": "settlement", "status": "fail", "detail": "; ".join(chain["issues"])})
+    elif rt.settlement.shutdowns():
+        checks.append(
+            {"name": "settlement", "status": "warn", "detail": f"{len(rt.settlement.shutdowns())} quota shutdowns"}
+        )
+    else:
+        checks.append({"name": "settlement", "status": "ok", "detail": "balance chain aligned"})
+
     return checks

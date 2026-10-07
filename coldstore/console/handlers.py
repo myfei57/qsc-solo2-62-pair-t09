@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 from coldstore.ammonia import validate_ppm, validate_threshold
@@ -14,6 +15,7 @@ from coldstore.quota import Quota, check_quota, validate_amount
 from coldstore.reporting import audit_export, telemetry_export, to_csv
 from coldstore.room import validate_zone
 from coldstore.scheduler import validate_threshold as validate_schedule_threshold
+from coldstore.settlement import enforce
 from coldstore.store import export_state
 from coldstore.temp import validate_temp
 from coldstore.valve import OPEN, validate_valve
@@ -24,7 +26,7 @@ from . import simulate as simulate_module
 from . import snapshot as snapshot_module
 from . import telemetry as telemetry_module
 from .cycle import run_cycle
-from .http import Request, Response, csv_response, json_response, text_response
+from .http import Request, RequestError, Response, csv_response, json_response, text_response
 from .report import text_report
 from .routes import route_table
 from .system import system_payload
@@ -620,6 +622,148 @@ def quota_check(server: "Server", request: Request) -> Response:
 def quota_reset(server: "Server", request: Request) -> Response:
     server.runtime.accumulator.reset()
     return json_response({"value": server.runtime.accumulator.value()})
+
+
+def settlement_state(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.settlement.state())
+
+
+def settlement_config(server: "Server", request: Request) -> Response:
+    fields = request.payload
+    config = server.runtime.settlement.configure(
+        limit=float(fields["limit"]) if "limit" in fields else None,
+        warn_ratio=float(fields["warn_ratio"]) if "warn_ratio" in fields else None,
+        shed_ratio=float(fields["shed_ratio"]) if "shed_ratio" in fields else None,
+    )
+    server.runtime.auditor.record("quota_config", json.dumps(config, ensure_ascii=False))
+    return json_response({"config": config})
+
+
+def settlement_shift_start(server: "Server", request: Request) -> Response:
+    shift = request.str_field("shift", "")
+    view = server.runtime.settlement.start_shift(shift or None)
+    server.runtime.auditor.record(
+        "quota_shift",
+        json.dumps({"shift": view.shift, "opening_balance": view.opening_balance}, ensure_ascii=False),
+    )
+    return json_response(view.as_dict())
+
+
+def settlement_periods(server: "Server", request: Request) -> Response:
+    views = server.runtime.settlement.periods()
+    return json_response({"periods": [view.as_dict() for view in views], "count": len(views)})
+
+
+def settlement_period(server: "Server", request: Request) -> Response:
+    view = server.runtime.settlement.period(request.str_field("shift"))
+    if view is None:
+        raise RequestError(404, f"shift {request.str_field('shift')} not found")
+    return json_response(view.as_dict())
+
+
+def settlement_balance(server: "Server", request: Request) -> Response:
+    shift = request.str_field("shift", "")
+    view = server.runtime.settlement.balance(shift or None)
+    return json_response(
+        {
+            "shift": view.shift,
+            "balance": view.closing_balance,
+            "balance_basis": "closing",
+            "used": view.total_charges,
+            "mean_balance": view.mean_balance,
+            "status": view.status,
+        }
+    )
+
+
+def settlement_charge(server: "Server", request: Request) -> Response:
+    amount = request.float_field("amount")
+    validate_amount(amount)
+    detail = request.str_field("detail", "runtime")
+    shift = request.str_field("shift", "")
+    view = server.runtime.settlement.charge(amount, detail=detail, shift=shift or None)
+    disposition = enforce(server.runtime.settlement, server.runtime.compressors, server.runtime.supply, view)
+    if disposition.acted:
+        server.runtime.auditor.record("quota_shutdown", disposition.reason)
+    return json_response({"period": view.as_dict(), "disposition": disposition.as_dict()})
+
+
+def settlement_adjust(server: "Server", request: Request) -> Response:
+    amount = request.float_field("amount")
+    reason = request.str_field("reason")
+    shift = request.str_field("shift", "")
+    view = server.runtime.settlement.adjust(amount, reason, shift=shift or None)
+    server.runtime.auditor.record(
+        "quota_adjust",
+        json.dumps(
+            {"shift": view.shift, "amount": amount, "reason": reason, "balance": view.closing_balance},
+            ensure_ascii=False,
+        ),
+    )
+    return json_response(view.as_dict())
+
+
+def settlement_settle(server: "Server", request: Request) -> Response:
+    view = server.runtime.settlement.settle()
+    server.runtime.auditor.record(
+        "quota_settle",
+        json.dumps(
+            {
+                "shift": view.shift,
+                "settlement_id": view.settlement_id,
+                "used": view.total_charges,
+                "adjustments": view.total_adjustments,
+                "closing_balance": view.closing_balance,
+                "mean_balance": view.mean_balance,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    return json_response(view.as_dict())
+
+
+def settlement_rollback(server: "Server", request: Request) -> Response:
+    correction = request.float_field("correction", 0.0)
+    reason = request.str_field("reason", "rollback recompute")
+    shift = request.str_field("shift", "")
+    view = server.runtime.settlement.rollback(
+        correction=correction, reason=reason, shift=shift or None
+    )
+    server.runtime.auditor.record(
+        "quota_rollback",
+        json.dumps(
+            {
+                "shift": view.shift,
+                "settlement_id": view.settlement_id,
+                "correction": correction,
+                "reason": reason,
+                "closing_balance": view.closing_balance,
+            },
+            ensure_ascii=False,
+        ),
+    )
+    chain = server.runtime.settlement.verify_chain()
+    if not chain["consistent"]:
+        raise RequestError(500, f"rollback broke the balance chain: {chain['issues']}")
+    return json_response({"period": view.as_dict(), "chain": chain})
+
+
+def settlement_enforce(server: "Server", request: Request) -> Response:
+    view = server.runtime.settlement.balance(request.str_field("shift", "") or None)
+    disposition = enforce(server.runtime.settlement, server.runtime.compressors, server.runtime.supply, view)
+    if disposition.acted:
+        server.runtime.auditor.record("quota_shutdown", disposition.reason)
+    return json_response(disposition.as_dict())
+
+
+def settlement_shutdowns(server: "Server", request: Request) -> Response:
+    shift = request.str_field("shift", "")
+    entries = server.runtime.settlement.shutdowns(shift or None)
+    return json_response({"shutdowns": entries, "count": len(entries)})
+
+
+def settlement_verify(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.settlement.verify_chain())
 
 
 def audit_list(server: "Server", request: Request) -> Response:

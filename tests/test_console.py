@@ -44,7 +44,17 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             {check["name"] for check in checks["checks"]},
-            {"store", "interlock", "ammonia", "temp", "compressors", "fans", "evap", "rooms"},
+            {
+                "store",
+                "interlock",
+                "ammonia",
+                "temp",
+                "compressors",
+                "fans",
+                "evap",
+                "rooms",
+                "settlement",
+            },
         )
 
         status, snapshot = self.call("GET", "/snapshot")
@@ -65,6 +75,7 @@ class ConsoleCase(unittest.TestCase):
                 "defrost",
                 "load",
                 "quota",
+                "settlement",
                 "audit",
                 "schedule",
             },
@@ -449,6 +460,133 @@ class ConsoleCase(unittest.TestCase):
         status, error = self.call("POST", "/room/add", {"id": "r1", "zone": -1})
         self.assertEqual(status, 400)
         self.assertIn("non-negative", error["error"])
+
+
+class SettlementCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = Store.open(f"{self._tmp.name}/state.json")
+        seed_defaults(self.store)
+        self.server = Server(self.store)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self._tmp.cleanup()
+
+    def call(self, method: str, path: str, payload: dict | None = None):
+        response = self.server.dispatch(method, path, payload)
+        body = json.loads(response.body.decode("utf-8"))
+        return response.status, body
+
+    def test_state_seeds_pinned_policy(self) -> None:
+        status, body = self.call("GET", "/settlement")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["balance_basis"], "closing")
+        self.assertEqual(body["overlimit_policy"], "shed_first")
+        self.assertEqual(body["config"]["limit"], 100.0)
+        self.assertEqual(body["config"]["warn_ratio"], 0.8)
+        self.assertEqual(body["config"]["shed_ratio"], 0.9)
+        self.assertTrue(body["chain"]["consistent"])
+
+    def test_shift_settle_carry_and_period_lookup(self) -> None:
+        self.call("POST", "/settlement/charge", {"amount": 30.0})
+        self.call("POST", "/settlement/charge", {"amount": 10.0})
+        status, body = self.call("POST", "/settlement/settle")
+        self.assertEqual(body["closing_balance"], 60.0)
+        self.assertEqual(body["used"], 40.0)
+
+        status, body = self.call("POST", "/settlement/shift/start", {"shift": "night"})
+        self.assertEqual(body["opening_balance"], 60.0)
+        self.call("POST", "/settlement/charge", {"amount": 20.0})
+
+        # Ops page query: balance by period.
+        status, body = self.call("POST", "/settlement/balance", {"shift": "shift-0001"})
+        self.assertEqual(body["balance"], 60.0)
+        self.assertEqual(body["balance_basis"], "closing")
+        status, body = self.call("POST", "/settlement/balance", {})
+        self.assertEqual(body["shift"], "night")
+        self.assertEqual(body["balance"], 40.0)
+
+        status, body = self.call("GET", "/settlement/periods")
+        self.assertEqual(body["count"], 2)
+
+        status, body = self.call("GET", "/settlement/verify")
+        self.assertTrue(body["consistent"])
+
+    def test_rollback_recompute_aligns_balance_and_audits(self) -> None:
+        self.call("POST", "/settlement/charge", {"amount": 80.0})
+        self.call("POST", "/settlement/settle")
+        self.call("POST", "/settlement/shift/start", {"shift": "night"})
+        self.call("POST", "/settlement/charge", {"amount": 10.0})
+
+        status, body = self.call(
+            "POST",
+            "/settlement/rollback",
+            {"correction": 10.0, "reason": "meter over-read"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["period"]["closing_balance"], 30.0)
+        self.assertTrue(body["chain"]["consistent"])
+        _, night = self.call("POST", "/settlement/balance", {"shift": "night"})
+        self.assertEqual(night["balance"], 20.0)  # opening realigned to 30
+
+        status, body = self.call("GET", "/audit")
+        kinds = {entry["kind"] for entry in body["entries"]}
+        self.assertIn("quota_settle", kinds)
+        self.assertIn("quota_rollback", kinds)
+
+    def test_refund_adjustment_is_audited(self) -> None:
+        self.call("POST", "/settlement/charge", {"amount": 50.0})
+        status, body = self.call(
+            "POST", "/settlement/adjust", {"amount": -20.0, "reason": "bad pulse"}
+        )
+        self.assertEqual(body["closing_balance"], 30.0)
+        status, body = self.call("POST", "/settlement/adjust", {"amount": 5.0})
+        self.assertEqual(status, 400)
+
+    def test_overlimit_shed_then_hard_with_shutdown_audit(self) -> None:
+        self.call("POST", "/comp/add", {"id": "c1", "stages": 4})
+        self.call("POST", "/comp/add", {"id": "c2", "stages": 2})
+        self.call("POST", "/valve/start", {"id": "c1"})
+        self.call("POST", "/valve/start", {"id": "c2"})
+        self.call("POST", "/comp/stage", {"id": "c1", "stage": 4})
+        self.call("POST", "/comp/stage", {"id": "c2", "stage": 2})
+
+        status, body = self.call("POST", "/settlement/charge", {"amount": 80.0})
+        self.assertEqual(body["disposition"]["level"], "warn")
+        self.assertEqual(body["disposition"]["acted"], False)
+
+        status, body = self.call("POST", "/settlement/charge", {"amount": 12.0})
+        self.assertEqual(body["disposition"]["level"], "shed")
+        self.assertEqual(body["disposition"]["shed"], ["c1"])
+
+        status, body = self.call("POST", "/settlement/charge", {"amount": 10.0})
+        self.assertEqual(body["disposition"]["level"], "hard")
+        self.assertEqual(set(body["disposition"]["stopped"]), {"c1", "c2"})
+
+        status, body = self.call("POST", "/settlement/shutdowns", {})
+        self.assertEqual(body["count"], 2)
+        levels = [entry["level"] for entry in body["shutdowns"]]
+        self.assertEqual(levels, ["shed", "hard"])
+        self.assertTrue(all(entry["reason"] for entry in body["shutdowns"]))
+
+        status, body = self.call("POST", "/settlement/shutdowns", {"shift": "shift-0001"})
+        self.assertEqual(body["count"], 2)
+
+        status, audit = self.call("GET", "/audit")
+        self.assertIn("quota_shutdown", {entry["kind"] for entry in audit["entries"]})
+
+    def test_config_endpoint_validates_tiers(self) -> None:
+        status, body = self.call("POST", "/settlement/config", {"limit": 200.0})
+        self.assertEqual(body["config"]["limit"], 200.0)
+        status, error = self.call("POST", "/settlement/config", {"warn_ratio": 0.99})
+        self.assertEqual(status, 400)
+        status, error = self.call("POST", "/settlement/config", {"limit": -1})
+        self.assertEqual(status, 400)
+
+    def test_period_lookup_missing_returns_404(self) -> None:
+        status, error = self.call("POST", "/settlement/period", {"shift": "ghost"})
+        self.assertEqual(status, 404)
 
 
 class WsgiCase(unittest.TestCase):

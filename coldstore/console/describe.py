@@ -25,6 +25,7 @@ def collect(rt: Runtime) -> dict[str, str]:
         "defrost": rt.defrost.describe(),
         "load": rt.load.describe(rt.rooms),
         "quota": rt.accumulator.describe(),
+        "settlement": rt.settlement.describe(),
         "audit": rt.auditor.describe(),
         "schedule": rt.scheduler.describe(rt.rooms),
     }

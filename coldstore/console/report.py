@@ -31,6 +31,7 @@ def text_report(rt: Runtime) -> str:
         f"defrost: {describe['defrost']}",
         f"load: {describe['load']}",
         f"quota: {describe['quota']}",
+        f"settlement: {describe['settlement']}",
         f"audit: {describe['audit']}",
         f"audit kinds={rt.auditor.kinds()}",
         (
@@ -57,5 +58,10 @@ def text_report(rt: Runtime) -> str:
         ),
         f"cooling load={telemetry.cooling_load:.4f} due={telemetry.schedule_due}",
         f"quota value={telemetry.quota_value:.4f} open valves={telemetry.supply_open}",
+        (
+            f"settlement shift={telemetry.settlement_shift or '-'} "
+            f"balance={telemetry.settlement_balance:.4f} used={telemetry.settlement_used:.4f} "
+            f"shutdowns={telemetry.settlement_shutdowns}"
+        ),
     ]
     return "\n".join(rows) + "\n"

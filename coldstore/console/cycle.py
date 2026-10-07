@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from coldstore.ammonia import validate_ppm
 from coldstore.quota import validate_amount
+from coldstore.settlement import enforce
 from coldstore.temp import validate_temp
 
 from .http import Request, Response, json_response
@@ -44,7 +45,10 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
         elif room_id:
             rt.defrost.finish(room_id)
 
-    quota_value = rt.accumulator.add(amount)
+    view = rt.settlement.charge(amount)
+    disposition = enforce(rt.settlement, rt.compressors, rt.supply, view)
+    if disposition.acted:
+        rt.auditor.record("quota_shutdown", disposition.reason)
     rt.auditor.record("cycle", f"{temp:.4f}")
 
     return json_response(
@@ -57,7 +61,11 @@ def run_cycle(rt: Runtime, request: Request) -> Response:
             "stage": rt.compressors.stage(comp_id)[0] if comp_id else 0,
             "supply_open": rt.supply.is_open(comp_id) if comp_id else False,
             "defrosting": rt.defrost.defrosting(),
-            "quota": quota_value,
+            "quota": view.total_charges,
+            "quota_shift": view.shift,
+            "quota_balance": view.closing_balance,
+            "quota_level": disposition.level,
+            "quota_stopped": disposition.stopped,
             "cooling_load": rt.load.load_for(temp),
             "audit_count": rt.auditor.count(),
         }

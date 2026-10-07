@@ -35,6 +35,11 @@ class Telemetry:
     defrost_warmups: int
     cooling_load: float
     quota_value: float
+    settlement_shift: str
+    settlement_balance: float
+    settlement_used: float
+    settlement_periods: int
+    settlement_shutdowns: int
     audit_entries: int
     schedule_due: int
 
@@ -64,6 +69,11 @@ class Telemetry:
             "defrost_warmups": self.defrost_warmups,
             "cooling_load": self.cooling_load,
             "quota_value": self.quota_value,
+            "settlement_shift": self.settlement_shift,
+            "settlement_balance": self.settlement_balance,
+            "settlement_used": self.settlement_used,
+            "settlement_periods": self.settlement_periods,
+            "settlement_shutdowns": self.settlement_shutdowns,
             "audit_entries": self.audit_entries,
             "schedule_due": self.schedule_due,
         }
@@ -74,6 +84,7 @@ def collect(rt: Runtime) -> Telemetry:
 
     temp = rt.temp.state()
     compressor_state = rt.compressors.state()
+    open_period = rt.settlement.open_period()
     return Telemetry(
         store_keys=rt.store.count(),
         rooms=rt.rooms.count(),
@@ -99,6 +110,11 @@ def collect(rt: Runtime) -> Telemetry:
         defrost_warmups=rt.defrost.warmup_count(),
         cooling_load=rt.load.total(rt.rooms),
         quota_value=rt.accumulator.value(),
+        settlement_shift=open_period.shift if open_period else "",
+        settlement_balance=open_period.closing_balance if open_period else 0.0,
+        settlement_used=open_period.total_charges if open_period else 0.0,
+        settlement_periods=len(rt.settlement.periods()),
+        settlement_shutdowns=len(rt.settlement.shutdowns()),
         audit_entries=rt.auditor.count(),
         schedule_due=len(rt.scheduler.due(rt.rooms)),
     )

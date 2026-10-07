@@ -15,6 +15,8 @@ from coldstore.quota import Accumulator
 from coldstore.scheduler import Scheduler
 from coldstore.scheduler.planner import THRESHOLD_KEY as SCHEDULE_THRESHOLD_KEY
 from coldstore.scheduler.planner import DEFAULT_THRESHOLD as SCHEDULE_THRESHOLD
+from coldstore.settlement import LEDGER_KEY as SETTLEMENT_LEDGER_KEY
+from coldstore.settlement import Settlement
 from coldstore.store import Store, append_event, has_key
 from coldstore.temp import Collector
 from coldstore.temp.collector import WINDOW_KEY
@@ -47,6 +49,11 @@ def seed_defaults(store: Store) -> None:
     accumulator = Accumulator(store)
     if accumulator.value() < 0:
         accumulator.reset()
+
+    if not has_key(store, SETTLEMENT_LEDGER_KEY):
+        # Touching the ledger persists the pinned policy defaults without
+        # forcing a shift open before the first charge.
+        Settlement(store).configure()
 
     scheduler = Scheduler(store)
     if not has_key(store, SCHEDULE_THRESHOLD_KEY):

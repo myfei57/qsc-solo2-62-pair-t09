@@ -17,6 +17,8 @@ class OpsCounters:
     running: int
     supply_open: int
     audit_entries: int
+    settlement_periods: int
+    settlement_shutdowns: int
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -26,6 +28,8 @@ class OpsCounters:
             "running": self.running,
             "supply_open": self.supply_open,
             "audit_entries": self.audit_entries,
+            "settlement_periods": self.settlement_periods,
+            "settlement_shutdowns": self.settlement_shutdowns,
         }
 
 
@@ -37,6 +41,8 @@ def collect(rt: Runtime) -> OpsCounters:
         running=rt.compressors.running_count(),
         supply_open=len(rt.supply.opened_ids()),
         audit_entries=rt.auditor.count(),
+        settlement_periods=len(rt.settlement.periods()),
+        settlement_shutdowns=len(rt.settlement.shutdowns()),
     )
 
 

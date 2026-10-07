@@ -13,6 +13,7 @@ from coldstore.load import LoadCalculator
 from coldstore.quota import Accumulator
 from coldstore.room import RoomRegistry
 from coldstore.scheduler import Scheduler
+from coldstore.settlement import Settlement
 from coldstore.store import Store
 from coldstore.temp import Collector
 from coldstore.valve import SupplyValve
@@ -38,5 +39,6 @@ class Runtime:
         self.defrost = Controller(cold_fans, rooms, store)
         self.load = LoadCalculator(store)
         self.accumulator = Accumulator(store)
+        self.settlement = Settlement(store)
         self.auditor = Auditor(store)
         self.scheduler = Scheduler(store)
